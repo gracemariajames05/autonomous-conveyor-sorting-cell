@@ -13,7 +13,7 @@ import pytest
 pkg_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(pkg_root))
 
-from sorting_cell.arm_controller import ArmCommandParser, JointRange
+from sorting_cell.arm_controller import ArmCommandParser, ArmControllerCore, JointRange
 from sorting_cell.serial_interface import SerialInterface
 
 
@@ -395,3 +395,131 @@ class TestRealSerialMockedPaths:
             # Calling again should be safe and not re-call close
             ser.disconnect()
             assert ser.is_connected is False
+
+
+class TestArmControllerCoreIntegration:
+    """Integration-style tests verifying the complete status feedback and error handling flow.
+
+    Flow:
+      /arm/command -> ArmCommandParser -> SerialInterface -> /arm/status
+    """
+
+    def setup_method(self):
+        self.parser = ArmCommandParser()
+        self.serial = SerialInterface(port='/dev/ttyACM0', mock_mode=True)
+        self.serial.connect()
+        self.controller = ArmControllerCore(
+            parser=self.parser,
+            serial_interface=self.serial,
+        )
+
+    def teardown_method(self):
+        self.serial.disconnect()
+
+    @pytest.mark.parametrize("command,expected_statuses", [
+        ("BASE 90", ["EXECUTING:BASE", "OK:BASE"]),
+        ("SHOULDER 60", ["EXECUTING:SHOULDER", "OK:SHOULDER"]),
+        ("ELBOW 120", ["EXECUTING:ELBOW", "OK:ELBOW"]),
+        ("WRIST 90", ["EXECUTING:WRIST", "OK:WRIST"]),
+        ("GRIPPER OPEN", ["EXECUTING:GRIPPER", "OK:GRIPPER"]),
+        ("GRIPPER CLOSE", ["EXECUTING:GRIPPER", "OK:GRIPPER"]),
+        ("HOME", ["EXECUTING:HOME", "OK:HOME"]),
+    ])
+    def test_successful_command_status_flow(self, command, expected_statuses):
+        final_status = self.controller.process_command(command)
+        assert self.controller.status_history == expected_statuses
+        assert final_status == expected_statuses[-1]
+
+    @pytest.mark.parametrize("bad_cmd", [
+        "BASE 999",
+        "BASE -50",
+        "BASE hello",
+        "BASE",
+        "SHOULDER",
+        "UNKNOWN",
+        "GRIPPER 123",
+        "HOME extra",
+        "",
+        "   ",
+    ])
+    def test_invalid_command_error_status_flow(self, bad_cmd):
+        final_status = self.controller.process_command(bad_cmd)
+        assert self.controller.status_history == ["ERROR:INVALID_COMMAND"]
+        assert final_status == "ERROR:INVALID_COMMAND"
+
+    def test_serial_timeout_status_flow(self):
+        self.serial.mock_simulate_timeout = True
+        final_status = self.controller.process_command("BASE 90")
+        assert self.controller.status_history == ["EXECUTING:BASE", "ERROR:SERIAL_TIMEOUT"]
+        assert final_status == "ERROR:SERIAL_TIMEOUT"
+
+    def test_arduino_disconnected_status_flow(self):
+        self.serial.mock_simulate_disconnect = True
+        final_status = self.controller.process_command("BASE 90")
+        assert self.controller.status_history == ["EXECUTING:BASE", "ERROR:ARDUINO_DISCONNECTED"]
+        assert final_status == "ERROR:ARDUINO_DISCONNECTED"
+
+    def test_serial_write_failure_status_flow(self):
+        mock_serial_mod = MagicMock()
+        mock_instance = MagicMock()
+        mock_instance.is_open = True
+        mock_instance.write.side_effect = Exception("USB cable yanked during write")
+        mock_serial_mod.Serial.return_value = mock_instance
+
+        with patch('sorting_cell.serial_interface.SERIAL_AVAILABLE', True), \
+             patch('sorting_cell.serial_interface.serial', mock_serial_mod):
+            real_ser = SerialInterface(port='/dev/ttyACM0', mock_mode=False)
+            real_ser.connect()
+            ctrl = ArmControllerCore(parser=self.parser, serial_interface=real_ser)
+            final_status = ctrl.process_command("BASE 90")
+            assert ctrl.status_history == ["EXECUTING:BASE", "ERROR:ARDUINO_DISCONNECTED"]
+            assert final_status == "ERROR:ARDUINO_DISCONNECTED"
+
+    def test_serial_read_failure_status_flow(self):
+        mock_serial_mod = MagicMock()
+        mock_instance = MagicMock()
+        mock_instance.is_open = True
+        mock_instance.readline.side_effect = Exception("USB read error")
+        mock_serial_mod.Serial.return_value = mock_instance
+
+        with patch('sorting_cell.serial_interface.SERIAL_AVAILABLE', True), \
+             patch('sorting_cell.serial_interface.serial', mock_serial_mod):
+            real_ser = SerialInterface(port='/dev/ttyACM0', mock_mode=False)
+            real_ser.connect()
+            ctrl = ArmControllerCore(parser=self.parser, serial_interface=real_ser)
+            final_status = ctrl.process_command("BASE 90")
+            assert ctrl.status_history == ["EXECUTING:BASE", "ERROR:ARDUINO_DISCONNECTED"]
+            assert final_status == "ERROR:ARDUINO_DISCONNECTED"
+
+    def test_malformed_arduino_response_status_flow(self):
+        mock_serial_mod = MagicMock()
+        mock_instance = MagicMock()
+        mock_instance.is_open = True
+        mock_instance.readline.return_value = b"CORRUPTED_SERIAL_STREAM\n"
+        mock_serial_mod.Serial.return_value = mock_instance
+
+        with patch('sorting_cell.serial_interface.SERIAL_AVAILABLE', True), \
+             patch('sorting_cell.serial_interface.serial', mock_serial_mod):
+            real_ser = SerialInterface(port='/dev/ttyACM0', mock_mode=False)
+            real_ser.connect()
+            ctrl = ArmControllerCore(parser=self.parser, serial_interface=real_ser)
+            final_status = ctrl.process_command("BASE 90")
+            assert ctrl.status_history == ["EXECUTING:BASE", "ERROR:MALFORMED_RESPONSE:CORRUPTED_SERIAL_STREAM"]
+            assert final_status == "ERROR:MALFORMED_RESPONSE:CORRUPTED_SERIAL_STREAM"
+
+    def test_arduino_error_response_status_flow(self):
+        mock_serial_mod = MagicMock()
+        mock_instance = MagicMock()
+        mock_instance.is_open = True
+        mock_instance.readline.return_value = b"ERROR:INVALID_COMMAND\n"
+        mock_serial_mod.Serial.return_value = mock_instance
+
+        with patch('sorting_cell.serial_interface.SERIAL_AVAILABLE', True), \
+             patch('sorting_cell.serial_interface.serial', mock_serial_mod):
+            real_ser = SerialInterface(port='/dev/ttyACM0', mock_mode=False)
+            real_ser.connect()
+            ctrl = ArmControllerCore(parser=self.parser, serial_interface=real_ser)
+            final_status = ctrl.process_command("BASE 90")
+            assert ctrl.status_history == ["EXECUTING:BASE", "ERROR:INVALID_COMMAND"]
+            assert final_status == "ERROR:INVALID_COMMAND"
+

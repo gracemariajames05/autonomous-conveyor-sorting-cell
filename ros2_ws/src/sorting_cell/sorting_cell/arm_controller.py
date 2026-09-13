@@ -6,7 +6,7 @@ and publishes execution status on /arm/status.
 """
 
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 import sys
 
 # Conditional import to allow pure Python parsing & unit testing on systems without rclpy
@@ -124,6 +124,77 @@ class ArmCommandParser:
         return False, None, None, f"UNKNOWN_COMMAND:{verb}"
 
 
+class ArmControllerCore:
+    """Core orchestration and status management for the robotic arm subsystem.
+
+    Decoupled from ROS 2 middleware to allow 100% unit and integration testing
+    on any platform without requiring an active DDS/rclpy runtime.
+    """
+
+    def __init__(
+        self,
+        parser: ArmCommandParser,
+        serial_interface: SerialInterface,
+        status_publisher: Optional[Callable[[str], None]] = None,
+        logger: Optional[Callable[[str], None]] = None,
+    ) -> None:
+        self.parser = parser
+        self.serial_interface = serial_interface
+        self._status_publisher = status_publisher or (lambda status: None)
+        self._logger = logger or (lambda msg: None)
+        self.last_status: Optional[str] = None
+        self.status_history: List[str] = []
+
+    def publish_status(self, status_text: str) -> None:
+        """Record and broadcast status update."""
+        self.last_status = status_text
+        self.status_history.append(status_text)
+        self._status_publisher(status_text)
+
+    def log(self, msg: str) -> None:
+        """Helper to output log message."""
+        self._logger(msg)
+
+    def process_command(self, raw_cmd: str) -> str:
+        """Process an incoming command string through validation, serial transmission, and status emission.
+
+        Flow:
+          1. Parse & validate raw command against limits.
+          2. If invalid: emit 'ERROR:INVALID_COMMAND' and return.
+          3. If valid: emit 'EXECUTING:<ACTION>' status.
+          4. Transmit newline-terminated command via serial interface.
+          5. On serial error: emit returned error status ('ERROR:SERIAL_TIMEOUT', 'ERROR:ARDUINO_DISCONNECTED', etc.).
+          6. On serial success: emit returned OK status ('OK:BASE', 'OK:HOME', 'OK:GRIPPER', etc.).
+
+        :param raw_cmd: Raw command string (e.g. 'BASE 90', 'HOME', 'GRIPPER OPEN')
+        :return: Final status string published to /arm/status
+        """
+        clean_cmd = raw_cmd.strip() if isinstance(raw_cmd, str) else ""
+        self.log(f"Received command: {clean_cmd}")
+
+        is_valid, serial_cmd, action_name, error_detail = self.parser.parse(clean_cmd)
+
+        if not is_valid:
+            self.log(f"Command validation failed ({error_detail}): '{clean_cmd}'")
+            self.publish_status("ERROR:INVALID_COMMAND")
+            return "ERROR:INVALID_COMMAND"
+
+        # Broadcast executing state
+        self.publish_status(f"EXECUTING:{action_name}")
+
+        # Send command over serial (real or mock)
+        success, response = self.serial_interface.send_and_receive(serial_cmd)
+
+        if not success:
+            self.log(f"Serial communication failed: {response}")
+            self.publish_status(response)
+            return response
+
+        # Command succeeded
+        self.publish_status(response)
+        return response
+
+
 class ArmControllerNode(Node):
     """ROS 2 Node controlling the robotic arm subsystem."""
 
@@ -199,6 +270,14 @@ class ArmControllerNode(Node):
         # ROS 2 Publisher: /arm/status
         self.status_publisher = self.create_publisher(String, '/arm/status', 10)
 
+        # Initialize core logic
+        self.core = ArmControllerCore(
+            parser=self.parser,
+            serial_interface=self.serial_interface,
+            status_publisher=self.publish_status,
+            logger=lambda msg: self.get_logger().info(msg),
+        )
+
         # ROS 2 Subscriber: /arm/command
         self.command_subscription = self.create_subscription(
             String,
@@ -211,9 +290,9 @@ class ArmControllerNode(Node):
         success, status = self.serial_interface.connect()
         if not success:
             self.get_logger().warn(f"Initial serial connection issue: {status}")
-            self.publish_status("ERROR:SERIAL_CONNECTION")
+            self.core.publish_status("ERROR:SERIAL_CONNECTION")
         else:
-            self.publish_status("IDLE")
+            self.core.publish_status("IDLE")
 
         self.get_logger().info(
             f"arm_controller node started (mock_mode={self.mock_mode}, port={self.serial_port})"
@@ -227,29 +306,7 @@ class ArmControllerNode(Node):
 
     def command_callback(self, msg: String) -> None:
         """Process incoming command message from /arm/command."""
-        raw_cmd = msg.data.strip()
-        self.get_logger().info(f"Received command: {raw_cmd}")
-
-        is_valid, serial_cmd, action_name, error_detail = self.parser.parse(raw_cmd)
-
-        if not is_valid:
-            self.get_logger().warn(f"Command validation failed ({error_detail}): '{raw_cmd}'")
-            self.publish_status("ERROR:INVALID_COMMAND")
-            return
-
-        # Publish executing status
-        self.publish_status(f"EXECUTING:{action_name}")
-
-        # Send command over serial (real or mock)
-        success, response = self.serial_interface.send_and_receive(serial_cmd)
-
-        if not success:
-            self.get_logger().error(f"Serial communication failed: {response}")
-            self.publish_status(response)
-            return
-
-        # Command succeeded
-        self.publish_status(response)
+        self.core.process_command(msg.data)
 
 
 def main(args=None) -> None:

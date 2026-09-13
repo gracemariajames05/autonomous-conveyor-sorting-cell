@@ -1,11 +1,12 @@
 """Unit tests for the sorting_cell arm controller subsystem.
 
 Tests command parsing, validation against configurable limits, malformed command handling,
-and mock serial communication without requiring physical hardware or ROS middleware.
+serial wire protocol formatting, connection lifecycle, mock serial responses, and error handling.
 """
 
 import sys
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 import pytest
 
 # Ensure sorting_cell is on PYTHONPATH
@@ -63,8 +64,8 @@ class TestArmCommandParserInvalid:
         ("BASE -50", "ANGLE_OUT_OF_LIMITS"),
         ("BASE hello", "NON_NUMERIC_ANGLE"),
         ("ELBOW abc", "NON_NUMERIC_ANGLE"),
-        ("SHOULDER 10", "ANGLE_OUT_OF_LIMITS"),  # default min is 15.0
-        ("SHOULDER 170", "ANGLE_OUT_OF_LIMITS"), # default max is 165.0
+        ("SHOULDER 10", "ANGLE_OUT_OF_LIMITS"),  # default min placeholder is 15.0
+        ("SHOULDER 170", "ANGLE_OUT_OF_LIMITS"), # default max placeholder is 165.0
         ("UNKNOWN", "UNKNOWN_COMMAND"),
         ("FOO BAR", "UNKNOWN_COMMAND"),
         ("GRIPPER 123", "INVALID_GRIPPER_STATE"),
@@ -157,3 +158,240 @@ class TestMockSerialInterface:
         success, response = self.serial.send_and_receive(bad_cmd)
         assert success is False
         assert response == "ERROR:INVALID_COMMAND"
+
+
+class TestSerialProtocolWireFormat:
+    """Verify that all commands transmitted over the wire are properly newline-terminated."""
+
+    def setup_method(self):
+        self.serial = SerialInterface(port='/dev/ttyACM0', mock_mode=True)
+        self.serial.connect()
+
+    def teardown_method(self):
+        self.serial.disconnect()
+
+    @pytest.mark.parametrize("command,expected_wire", [
+        ("HOME", "HOME\n"),
+        ("BASE:90", "BASE:90\n"),
+        ("SHOULDER:60", "SHOULDER:60\n"),
+        ("ELBOW:120", "ELBOW:120\n"),
+        ("WRIST:90", "WRIST:90\n"),
+        ("GRIPPER:OPEN", "GRIPPER:OPEN\n"),
+        ("GRIPPER:CLOSE", "GRIPPER:CLOSE\n"),
+        ("  BASE:90  ", "BASE:90\n"),
+    ])
+    def test_newline_termination(self, command, expected_wire):
+        self.serial.send_and_receive(command)
+        assert self.serial.last_sent_command is not None
+        assert self.serial.last_sent_command.endswith('\n')
+        assert self.serial.last_sent_command == expected_wire
+
+    @pytest.mark.parametrize("empty_cmd", ["", "   ", "\t", "\n"])
+    def test_empty_command_rejection(self, empty_cmd):
+        success, response = self.serial.send_and_receive(empty_cmd)
+        assert success is False
+        assert response == "ERROR:INVALID_COMMAND"
+
+
+class TestMockSerialLifecycle:
+    """Verify connection lifecycle in mock mode."""
+
+    def test_lifecycle_connect_and_disconnect(self):
+        ser = SerialInterface(port='/dev/ttyACM0', mock_mode=True)
+        assert ser.is_connected is False
+
+        connected, status = ser.connect()
+        assert connected is True
+        assert status == "CONNECTED_MOCK"
+        assert ser.is_connected is True
+
+        ser.disconnect()
+        assert ser.is_connected is False
+
+        # Safe repeated disconnect
+        ser.disconnect()
+        assert ser.is_connected is False
+
+    def test_send_when_disconnected(self):
+        ser = SerialInterface(port='/dev/ttyACM0', mock_mode=True)
+        assert ser.is_connected is False
+
+        success, response = ser.send_and_receive("HOME")
+        assert success is False
+        assert response == "ERROR:ARDUINO_DISCONNECTED"
+
+    def test_reconnect_after_disconnect(self):
+        ser = SerialInterface(port='/dev/ttyACM0', mock_mode=True)
+        ser.connect()
+        ser.disconnect()
+        assert ser.is_connected is False
+
+        # Reconnect
+        connected, _ = ser.connect()
+        assert connected is True
+        success, response = ser.send_and_receive("HOME")
+        assert success is True
+        assert response == "OK:HOME"
+        ser.disconnect()
+
+    def test_mock_error_simulations(self):
+        ser = SerialInterface(port='/dev/ttyACM0', mock_mode=True)
+        ser.connect()
+
+        # Simulate timeout
+        ser.mock_simulate_timeout = True
+        success, response = ser.send_and_receive("BASE:90")
+        assert success is False
+        assert response == "ERROR:SERIAL_TIMEOUT"
+        ser.mock_simulate_timeout = False
+
+        # Simulate disconnect
+        ser.mock_simulate_disconnect = True
+        success, response = ser.send_and_receive("BASE:90")
+        assert success is False
+        assert response == "ERROR:ARDUINO_DISCONNECTED"
+        assert ser.is_connected is False
+
+
+class TestRealSerialMockedPaths:
+    """Verify real hardware serial logic (pyserial interactions, timeouts, exceptions)."""
+
+    def test_real_serial_unavailable_without_pyserial(self):
+        with patch('sorting_cell.serial_interface.SERIAL_AVAILABLE', False):
+            ser = SerialInterface(port='/dev/ttyACM0', mock_mode=False)
+            connected, status = ser.connect()
+            assert connected is False
+            assert status == "ERROR:SERIAL_UNAVAILABLE"
+            assert ser.is_connected is False
+
+    def test_real_serial_connection_failure(self):
+        mock_serial_mod = MagicMock()
+        mock_serial_mod.Serial.side_effect = Exception("Port /dev/ttyACM0 not found")
+
+        with patch('sorting_cell.serial_interface.SERIAL_AVAILABLE', True), \
+             patch('sorting_cell.serial_interface.serial', mock_serial_mod):
+            ser = SerialInterface(port='/dev/ttyACM0', mock_mode=False)
+            connected, status = ser.connect()
+            assert connected is False
+            assert status == "ERROR:SERIAL_CONNECTION"
+            assert ser.is_connected is False
+
+    def test_real_serial_successful_exchange(self):
+        mock_serial_mod = MagicMock()
+        mock_instance = MagicMock()
+        mock_instance.is_open = True
+        mock_instance.readline.return_value = b"OK:BASE\n"
+        mock_serial_mod.Serial.return_value = mock_instance
+
+        with patch('sorting_cell.serial_interface.SERIAL_AVAILABLE', True), \
+             patch('sorting_cell.serial_interface.serial', mock_serial_mod):
+            ser = SerialInterface(port='/dev/ttyACM0', mock_mode=False)
+            connected, _ = ser.connect()
+            assert connected is True
+
+            success, response = ser.send_and_receive("BASE:90")
+            assert success is True
+            assert response == "OK:BASE"
+            mock_instance.write.assert_called_with(b"BASE:90\n")
+
+    def test_real_serial_timeout_on_read(self):
+        mock_serial_mod = MagicMock()
+        mock_instance = MagicMock()
+        mock_instance.is_open = True
+        mock_instance.readline.return_value = b""  # pyserial returns empty bytes on timeout
+        mock_serial_mod.Serial.return_value = mock_instance
+
+        with patch('sorting_cell.serial_interface.SERIAL_AVAILABLE', True), \
+             patch('sorting_cell.serial_interface.serial', mock_serial_mod):
+            ser = SerialInterface(port='/dev/ttyACM0', mock_mode=False)
+            ser.connect()
+
+            success, response = ser.send_and_receive("BASE:90")
+            assert success is False
+            assert response == "ERROR:SERIAL_TIMEOUT"
+
+    def test_real_serial_write_failure(self):
+        mock_serial_mod = MagicMock()
+        mock_instance = MagicMock()
+        mock_instance.is_open = True
+        mock_instance.write.side_effect = Exception("Hardware unplugged during write")
+        mock_serial_mod.Serial.return_value = mock_instance
+
+        with patch('sorting_cell.serial_interface.SERIAL_AVAILABLE', True), \
+             patch('sorting_cell.serial_interface.serial', mock_serial_mod):
+            ser = SerialInterface(port='/dev/ttyACM0', mock_mode=False)
+            ser.connect()
+
+            success, response = ser.send_and_receive("BASE:90")
+            assert success is False
+            assert response == "ERROR:ARDUINO_DISCONNECTED"
+            assert ser.is_connected is False
+
+    def test_real_serial_read_failure(self):
+        mock_serial_mod = MagicMock()
+        mock_instance = MagicMock()
+        mock_instance.is_open = True
+        mock_instance.readline.side_effect = Exception("Hardware unplugged during read")
+        mock_serial_mod.Serial.return_value = mock_instance
+
+        with patch('sorting_cell.serial_interface.SERIAL_AVAILABLE', True), \
+             patch('sorting_cell.serial_interface.serial', mock_serial_mod):
+            ser = SerialInterface(port='/dev/ttyACM0', mock_mode=False)
+            ser.connect()
+
+            success, response = ser.send_and_receive("BASE:90")
+            assert success is False
+            assert response == "ERROR:ARDUINO_DISCONNECTED"
+            assert ser.is_connected is False
+
+    def test_real_serial_malformed_response(self):
+        mock_serial_mod = MagicMock()
+        mock_instance = MagicMock()
+        mock_instance.is_open = True
+        mock_instance.readline.return_value = b"UNKNOWN_GARBAGE\n"
+        mock_serial_mod.Serial.return_value = mock_instance
+
+        with patch('sorting_cell.serial_interface.SERIAL_AVAILABLE', True), \
+             patch('sorting_cell.serial_interface.serial', mock_serial_mod):
+            ser = SerialInterface(port='/dev/ttyACM0', mock_mode=False)
+            ser.connect()
+
+            success, response = ser.send_and_receive("BASE:90")
+            assert success is False
+            assert response == "ERROR:MALFORMED_RESPONSE:UNKNOWN_GARBAGE"
+
+    def test_real_serial_arduino_error_response(self):
+        mock_serial_mod = MagicMock()
+        mock_instance = MagicMock()
+        mock_instance.is_open = True
+        mock_instance.readline.return_value = b"ERROR:INVALID_COMMAND\n"
+        mock_serial_mod.Serial.return_value = mock_instance
+
+        with patch('sorting_cell.serial_interface.SERIAL_AVAILABLE', True), \
+             patch('sorting_cell.serial_interface.serial', mock_serial_mod):
+            ser = SerialInterface(port='/dev/ttyACM0', mock_mode=False)
+            ser.connect()
+
+            success, response = ser.send_and_receive("BASE:90")
+            assert success is False
+            assert response == "ERROR:INVALID_COMMAND"
+
+    def test_real_serial_safe_disconnect(self):
+        mock_serial_mod = MagicMock()
+        mock_instance = MagicMock()
+        mock_instance.is_open = True
+        mock_serial_mod.Serial.return_value = mock_instance
+
+        with patch('sorting_cell.serial_interface.SERIAL_AVAILABLE', True), \
+             patch('sorting_cell.serial_interface.serial', mock_serial_mod):
+            ser = SerialInterface(port='/dev/ttyACM0', mock_mode=False)
+            ser.connect()
+            assert ser.is_connected is True
+
+            ser.disconnect()
+            assert ser.is_connected is False
+            mock_instance.close.assert_called_once()
+
+            # Calling again should be safe and not re-call close
+            ser.disconnect()
+            assert ser.is_connected is False

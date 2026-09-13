@@ -41,6 +41,11 @@ class SerialInterface:
 
         self._ser = None
         self._is_connected = False
+        self.last_sent_command: Optional[str] = None
+
+        # Test hooks for simulating error conditions in mock mode
+        self.mock_simulate_timeout: bool = False
+        self.mock_simulate_disconnect: bool = False
 
     @property
     def is_connected(self) -> bool:
@@ -65,6 +70,7 @@ class SerialInterface:
 
         if not SERIAL_AVAILABLE:
             self._is_connected = False
+            self.log(f"[WARN] SERIAL: pyserial is not installed; hardware port '{self.port}' unavailable")
             return False, "ERROR:SERIAL_UNAVAILABLE"
 
         try:
@@ -82,7 +88,7 @@ class SerialInterface:
             return False, "ERROR:SERIAL_CONNECTION"
 
     def disconnect(self) -> None:
-        """Close the serial connection if open."""
+        """Close the serial connection if open. Safe to call repeatedly."""
         if self._ser is not None:
             try:
                 self._ser.close()
@@ -102,18 +108,28 @@ class SerialInterface:
             return False, "ERROR:INVALID_COMMAND"
 
         wire_cmd = clean_cmd + '\n'
+        self.last_sent_command = wire_cmd
 
         if self.mock_mode:
+            if not self.is_connected:
+                return False, "ERROR:ARDUINO_DISCONNECTED"
+
+            if self.mock_simulate_disconnect:
+                self.disconnect()
+                return False, "ERROR:ARDUINO_DISCONNECTED"
+
+            if self.mock_simulate_timeout:
+                return False, "ERROR:SERIAL_TIMEOUT"
+
             self.log(f"MOCK SERIAL -> {clean_cmd}")
             response = self._simulate_mock_response(clean_cmd)
             self.log(f"MOCK ARDUINO -> {response}")
-            is_success = response.startswith("OK:")
+            is_success = response.startswith("OK")
             return is_success, response
 
         # Real hardware serial path
         if not self.is_connected:
-            # Attempt automatic reconnect if disconnected
-            connected, err = self.connect()
+            connected, _ = self.connect()
             if not connected:
                 return False, "ERROR:ARDUINO_DISCONNECTED"
 
@@ -121,22 +137,31 @@ class SerialInterface:
             self._ser.reset_input_buffer()
             self._ser.write(wire_cmd.encode('utf-8'))
             self._ser.flush()
-
-            raw_line = self._ser.readline()
-            if not raw_line:
-                return False, "ERROR:SERIAL_TIMEOUT"
-
-            response = raw_line.decode('utf-8', errors='replace').strip()
-            if not response:
-                return False, "ERROR:SERIAL_TIMEOUT"
-
-            is_success = response.startswith("OK:")
-            return is_success, response
-
         except Exception as err:
-            self.log(f"[ERROR] SERIAL: Communication failure: {err}")
+            self.log(f"[ERROR] SERIAL: Write failure: {err}")
             self.disconnect()
             return False, "ERROR:ARDUINO_DISCONNECTED"
+
+        try:
+            raw_line = self._ser.readline()
+        except Exception as err:
+            self.log(f"[ERROR] SERIAL: Read failure: {err}")
+            self.disconnect()
+            return False, "ERROR:ARDUINO_DISCONNECTED"
+
+        if not raw_line:
+            return False, "ERROR:SERIAL_TIMEOUT"
+
+        response = raw_line.decode('utf-8', errors='replace').strip()
+        if not response:
+            return False, "ERROR:SERIAL_TIMEOUT"
+
+        if response.startswith("OK"):
+            return True, response
+        elif response.startswith("ERROR"):
+            return False, response
+        else:
+            return False, f"ERROR:MALFORMED_RESPONSE:{response}"
 
     def _simulate_mock_response(self, command: str) -> str:
         """Simulate Arduino protocol responses for mock testing.

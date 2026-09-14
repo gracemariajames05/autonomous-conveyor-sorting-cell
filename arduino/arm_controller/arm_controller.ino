@@ -51,10 +51,10 @@ const float SERVO_PWM_FREQ = 50.0;
 // PCA9685 12-bit PWM pulse width boundaries (4096 counts = 20ms period at 50Hz)
 // Standard RC servo pulse: ~1.0ms (min) to ~2.0ms (max), or ~0.5ms to ~2.5ms extended.
 // NOTE: These are uncalibrated software defaults; hardware team must calibrate for each joint.
-const uint16_t DEFAULT_PULSE_MIN = 102; // ~500 microseconds (placeholder for min angle)
-const uint16_t DEFAULT_PULSE_MAX = 512; // ~2500 microseconds (placeholder for max angle)
+const uint16_t DEFAULT_PULSE_MIN = 102;
+const uint16_t DEFAULT_PULSE_MAX = 512;
 
-// PCA9685 Channel Assignments (Software placeholder - hardware team to confirm wiring)
+// PCA9685 Channel Assignments
 const uint8_t CH_BASE        = 0;
 const uint8_t CH_SHOULDER    = 1;
 const uint8_t CH_ELBOW       = 2;
@@ -62,16 +62,16 @@ const uint8_t CH_WRIST_ROLL  = 3;
 const uint8_t CH_WRIST_PITCH = 4;
 const uint8_t CH_CLAW        = 5;
 
-// Configurable Home Position Angles (Software placeholders - to be calibrated by hardware team)
-const float HOME_ANGLE_BASE     = 0.0;
-const float HOME_ANGLE_SHOULDER = 0.0;
-const float HOME_ANGLE_ELBOW    = 0.0;
-const float HOME_ANGLE_WRIST    = 0.0;
-const float HOME_ANGLE_EXTRA    = 0.0;
+// Home Position Angles
+const float HOME_ANGLE_BASE        = 0.0;
+const float HOME_ANGLE_SHOULDER    = 0.0;
+const float HOME_ANGLE_ELBOW       = 0.0;
+const float HOME_ANGLE_WRIST_ROLL  = 0.0;
+const float HOME_ANGLE_WRIST_PITCH = 0.0;
 
-// Configurable Gripper Angular Setpoints (Placeholders)
-const float GRIPPER_OPEN_ANGLE  = 30.0; // Angle corresponding to open jaws
-const float GRIPPER_CLOSE_ANGLE = 90.0; // Angle corresponding to closed jaws
+// Gripper Angular Setpoints
+const float GRIPPER_OPEN_ANGLE  = 30.0;
+const float GRIPPER_CLOSE_ANGLE = 90.0;
 
 // Serial buffer configuration
 const size_t BUFFER_SIZE = 64;
@@ -81,11 +81,6 @@ size_t bufferIndex = 0;
 // =====================================================================================
 // PWM CONVERSION & SERVO CONTROL HELPER FUNCTIONS
 // =====================================================================================
-
-/**
- * Convert a target angle (0 to 180 deg) to 12-bit PCA9685 PWM count (0 to 4095).
- * Enforces bounds and uses configurable min/max pulse limits.
- */
 
 bool isAngleWithinLimits(float angle, float minAngle, float maxAngle)
 {
@@ -124,35 +119,22 @@ bool setServoAngle(
     return true;
 }
 
-/**
- * Move all joints to their configured HOME placeholder positions.
- */
+// Move all joints to their configured HOME placeholder positions.
 void executeHome() {
     setServoAngle(CH_BASE, HOME_ANGLE_BASE);
     setServoAngle(CH_SHOULDER, HOME_ANGLE_SHOULDER);
     setServoAngle(CH_ELBOW, HOME_ANGLE_ELBOW);
-    setServoAngle(CH_WRIST, HOME_ANGLE_WRIST);
-    setServoAngle(CH_EXTRA, HOME_ANGLE_EXTRA);
-    setServoAngle(CH_GRIPPER, GRIPPER_OPEN_ANGLE);
+    setServoAngle(CH_WRIST_ROLL, HOME_ANGLE_WRIST_ROLL);
+    setServoAngle(CH_WRIST_PITCH, HOME_ANGLE_WRIST_PITCH);
+    setServoAngle(CH_CLAW, GRIPPER_OPEN_ANGLE);
 }
 
 // =====================================================================================
 // COMMAND PARSER & DISPATCHER
 // =====================================================================================
 
-/**
- * Parses and executes a complete, validated command string.
- * Protocol:
- *   HOME              -> OK:HOME
- *   BASE:<angle>      -> OK:BASE
- *   SHOULDER:<angle>  -> OK:SHOULDER
- *   ELBOW:<angle>     -> OK:ELBOW
- *   WRIST:<angle>     -> OK:WRIST
- *   GRIPPER:OPEN      -> OK:GRIPPER
- *   GRIPPER:CLOSE     -> OK:GRIPPER
- *   <anything else>   -> ERROR:INVALID_COMMAND
- */
 void processCommand(char* cmd) {
+
     // Trim leading whitespace
     while (*cmd == ' ' || *cmd == '\t') {
         cmd++;
@@ -160,7 +142,10 @@ void processCommand(char* cmd) {
 
     // Trim trailing whitespace
     int len = strlen(cmd);
-    while (len > 0 && (cmd[len - 1] == ' ' || cmd[len - 1] == '\t' || cmd[len - 1] == '\r')) {
+    while (len > 0 &&
+           (cmd[len - 1] == ' ' ||
+            cmd[len - 1] == '\t' ||
+            cmd[len - 1] == '\r')) {
         cmd[--len] = '\0';
     }
 
@@ -169,21 +154,23 @@ void processCommand(char* cmd) {
         return;
     }
 
-    // 1. HOME command
+    // HOME command
     if (strcmp(cmd, "HOME") == 0) {
         executeHome();
         Serial.println(F("OK:HOME"));
         return;
     }
 
-    // Commands with a colon separator: <TARGET>:<VALUE>
+    // Commands with colon separator: <TARGET>:<VALUE>
     char* colonPos = strchr(cmd, ':');
+
     if (colonPos == NULL) {
         Serial.println(F("ERROR:INVALID_COMMAND"));
         return;
     }
 
     *colonPos = '\0';
+
     char* target = cmd;
     char* valueStr = colonPos + 1;
 
@@ -193,31 +180,35 @@ void processCommand(char* cmd) {
         return;
     }
 
-    // 2. GRIPPER command: GRIPPER:OPEN or GRIPPER:CLOSE
+    // GRIPPER command
     if (strcmp(target, "GRIPPER") == 0) {
+
         if (strcmp(valueStr, "OPEN") == 0) {
-            setServoAngle(CH_GRIPPER, GRIPPER_OPEN_ANGLE);
+            setServoAngle(CH_CLAW, GRIPPER_OPEN_ANGLE);
             Serial.println(F("OK:GRIPPER"));
             return;
+
         } else if (strcmp(valueStr, "CLOSE") == 0) {
-            setServoAngle(CH_GRIPPER, GRIPPER_CLOSE_ANGLE);
+            setServoAngle(CH_CLAW, GRIPPER_CLOSE_ANGLE);
             Serial.println(F("OK:GRIPPER"));
             return;
+
         } else {
             Serial.println(F("ERROR:INVALID_COMMAND"));
             return;
         }
     }
 
-    // 3. Joint angle commands: BASE, SHOULDER, ELBOW, WRIST
+    // Joint angle commands
     char* endPtr = NULL;
     float angle = strtod(valueStr, &endPtr);
 
-    // If conversion failed (no digits consumed) or trailing non-whitespace garbage exists
+    // If conversion failed
     if (endPtr == valueStr) {
         Serial.println(F("ERROR:INVALID_COMMAND"));
         return;
     }
+
     // Ensure rest of valueStr is only whitespace
     while (*endPtr != '\0') {
         if (*endPtr != ' ' && *endPtr != '\t') {
@@ -236,6 +227,7 @@ void processCommand(char* cmd) {
     }
 
     if (strcmp(target, "BASE") == 0) {
+
         if (setServoAngle(CH_BASE, angle, MIN_ANGLE, MAX_ANGLE)) {
             Serial.println(F("OK:BASE"));
         } else {
@@ -243,6 +235,7 @@ void processCommand(char* cmd) {
         }
 
     } else if (strcmp(target, "SHOULDER") == 0) {
+
         if (setServoAngle(CH_SHOULDER, angle, MIN_ANGLE, MAX_ANGLE)) {
             Serial.println(F("OK:SHOULDER"));
         } else {
@@ -250,6 +243,7 @@ void processCommand(char* cmd) {
         }
 
     } else if (strcmp(target, "ELBOW") == 0) {
+
         if (setServoAngle(CH_ELBOW, angle, MIN_ANGLE, MAX_ANGLE)) {
             Serial.println(F("OK:ELBOW"));
         } else {
@@ -257,6 +251,7 @@ void processCommand(char* cmd) {
         }
 
     } else if (strcmp(target, "WRIST") == 0) {
+
         if (setServoAngle(CH_WRIST_ROLL, angle, MIN_ANGLE, MAX_ANGLE)) {
             Serial.println(F("OK:WRIST"));
         } else {
@@ -273,46 +268,54 @@ void processCommand(char* cmd) {
 // =====================================================================================
 
 void setup() {
+
     // Initialize USB Serial communication
     Serial.begin(SERIAL_BAUD_RATE);
+
     while (!Serial) {
-        ; // Wait for native USB if needed (e.g. Leonardo/Micro; Uno proceeds immediately)
+        ;
     }
 
     // Initialize I2C communication and PCA9685 PWM driver
     Wire.begin();
     pwm.begin();
-    pwm.setOscillatorFrequency(27000000); // Standard internal oscillator frequency (27MHz)
-    pwm.setPWMFreq(SERVO_PWM_FREQ);       // 50 Hz servo PWM rate
+    pwm.setOscillatorFrequency(27000000);
+    pwm.setPWMFreq(SERVO_PWM_FREQ);
 
     // Safety pause after initialization
     delay(10);
 
-    // NOTE: Servos are deliberately NOT homed on powerup to prevent abrupt
-    // mechanical movement before explicit command from ROS 2.
+    // Servos are deliberately NOT homed on powerup.
 }
 
 void loop() {
+
     // Non-blocking serial reception
     while (Serial.available() > 0) {
+
         char inChar = (char)Serial.read();
 
-        // End of line received (newline)
+        // End of line received
         if (inChar == '\n') {
+
             serialBuffer[bufferIndex] = '\0';
             processCommand(serialBuffer);
-            bufferIndex = 0; // Reset buffer for next command
+            bufferIndex = 0;
         }
+
         // Discard carriage returns
         else if (inChar == '\r') {
             continue;
         }
-        // Append character to buffer with overflow protection
+
+        // Append character with overflow protection
         else {
+
             if (bufferIndex < BUFFER_SIZE - 1) {
                 serialBuffer[bufferIndex++] = inChar;
+
             } else {
-                // Buffer overflow protection: reset and report error
+
                 bufferIndex = 0;
                 Serial.println(F("ERROR:INVALID_COMMAND"));
             }

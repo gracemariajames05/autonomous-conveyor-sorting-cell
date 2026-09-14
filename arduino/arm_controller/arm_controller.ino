@@ -55,19 +55,19 @@ const uint16_t DEFAULT_PULSE_MIN = 102; // ~500 microseconds (placeholder for mi
 const uint16_t DEFAULT_PULSE_MAX = 512; // ~2500 microseconds (placeholder for max angle)
 
 // PCA9685 Channel Assignments (Software placeholder - hardware team to confirm wiring)
-const uint8_t CH_BASE     = 0; // Channel 0: Base rotation (MG996R)
-const uint8_t CH_SHOULDER = 1; // Channel 1: Shoulder joint (MG996R)
-const uint8_t CH_ELBOW    = 2; // Channel 2: Elbow joint (MG996R)
-const uint8_t CH_WRIST    = 3; // Channel 3: Wrist pitch/rotation (MG90S)
-const uint8_t CH_GRIPPER  = 4; // Channel 4: Gripper open/close (MG90S)
-const uint8_t CH_EXTRA    = 5; // Channel 5: 6th servo placeholder (MG90S wrist roll/spare)
+const uint8_t CH_BASE        = 0;
+const uint8_t CH_SHOULDER    = 1;
+const uint8_t CH_ELBOW       = 2;
+const uint8_t CH_WRIST_ROLL  = 3;
+const uint8_t CH_WRIST_PITCH = 4;
+const uint8_t CH_CLAW        = 5;
 
 // Configurable Home Position Angles (Software placeholders - to be calibrated by hardware team)
-const float HOME_ANGLE_BASE     = 90.0;
-const float HOME_ANGLE_SHOULDER = 90.0;
-const float HOME_ANGLE_ELBOW    = 90.0;
-const float HOME_ANGLE_WRIST    = 90.0;
-const float HOME_ANGLE_EXTRA    = 90.0;
+const float HOME_ANGLE_BASE     = 0.0;
+const float HOME_ANGLE_SHOULDER = 0.0;
+const float HOME_ANGLE_ELBOW    = 0.0;
+const float HOME_ANGLE_WRIST    = 0.0;
+const float HOME_ANGLE_EXTRA    = 0.0;
 
 // Configurable Gripper Angular Setpoints (Placeholders)
 const float GRIPPER_OPEN_ANGLE  = 30.0; // Angle corresponding to open jaws
@@ -86,21 +86,42 @@ size_t bufferIndex = 0;
  * Convert a target angle (0 to 180 deg) to 12-bit PCA9685 PWM count (0 to 4095).
  * Enforces bounds and uses configurable min/max pulse limits.
  */
-uint16_t angleToPwmCount(float angle, float minAngle = 0.0, float maxAngle = 180.0,
-                         uint16_t minPwm = DEFAULT_PULSE_MIN, uint16_t maxPwm = DEFAULT_PULSE_MAX) {
-    if (angle < minAngle) angle = minAngle;
-    if (angle > maxAngle) angle = maxAngle;
 
+bool isAngleWithinLimits(float angle, float minAngle, float maxAngle)
+{
+    return angle >= minAngle && angle <= maxAngle;
+}
+
+uint16_t angleToPwmCount(
+    float angle,
+    float minAngle = 0.0,
+    float maxAngle = 180.0,
+    uint16_t minPwm = DEFAULT_PULSE_MIN,
+    uint16_t maxPwm = DEFAULT_PULSE_MAX
+) {
     float ratio = (angle - minAngle) / (maxAngle - minAngle);
     return (uint16_t)(minPwm + ratio * (maxPwm - minPwm) + 0.5);
 }
 
-/**
- * Set a PCA9685 channel to a specific target angle.
- */
-void setServoAngle(uint8_t channel, float angle) {
-    uint16_t pwmVal = angleToPwmCount(angle);
+bool setServoAngle(
+    uint8_t channel,
+    float angle,
+    float minAngle = 0.0,
+    float maxAngle = 180.0
+) {
+    // Reject invalid angles instead of silently clamping them.
+    if (angle < minAngle || angle > maxAngle) {
+        return false;
+    }
+
+    uint16_t pwmVal = angleToPwmCount(
+        angle,
+        minAngle,
+        maxAngle
+    );
+
     pwm.setPWM(channel, 0, pwmVal);
+    return true;
 }
 
 /**
@@ -206,18 +227,42 @@ void processCommand(char* cmd) {
         endPtr++;
     }
 
+    const float MIN_ANGLE = 0.0;
+    const float MAX_ANGLE = 180.0;
+
+    if (angle < MIN_ANGLE || angle > MAX_ANGLE) {
+        Serial.println(F("ERROR:INVALID_COMMAND"));
+        return;
+    }
+
     if (strcmp(target, "BASE") == 0) {
-        setServoAngle(CH_BASE, angle);
-        Serial.println(F("OK:BASE"));
+        if (setServoAngle(CH_BASE, angle, MIN_ANGLE, MAX_ANGLE)) {
+            Serial.println(F("OK:BASE"));
+        } else {
+            Serial.println(F("ERROR:INVALID_COMMAND"));
+        }
+
     } else if (strcmp(target, "SHOULDER") == 0) {
-        setServoAngle(CH_SHOULDER, angle);
-        Serial.println(F("OK:SHOULDER"));
+        if (setServoAngle(CH_SHOULDER, angle, MIN_ANGLE, MAX_ANGLE)) {
+            Serial.println(F("OK:SHOULDER"));
+        } else {
+            Serial.println(F("ERROR:INVALID_COMMAND"));
+        }
+
     } else if (strcmp(target, "ELBOW") == 0) {
-        setServoAngle(CH_ELBOW, angle);
-        Serial.println(F("OK:ELBOW"));
+        if (setServoAngle(CH_ELBOW, angle, MIN_ANGLE, MAX_ANGLE)) {
+            Serial.println(F("OK:ELBOW"));
+        } else {
+            Serial.println(F("ERROR:INVALID_COMMAND"));
+        }
+
     } else if (strcmp(target, "WRIST") == 0) {
-        setServoAngle(CH_WRIST, angle);
-        Serial.println(F("OK:WRIST"));
+        if (setServoAngle(CH_WRIST_ROLL, angle, MIN_ANGLE, MAX_ANGLE)) {
+            Serial.println(F("OK:WRIST"));
+        } else {
+            Serial.println(F("ERROR:INVALID_COMMAND"));
+        }
+
     } else {
         Serial.println(F("ERROR:INVALID_COMMAND"));
     }

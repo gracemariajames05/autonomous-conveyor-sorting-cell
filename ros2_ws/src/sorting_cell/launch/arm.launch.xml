@@ -1,0 +1,19 @@
+<launch>
+  <arg name="mock_mode" default="false" description="Run without physical Arduino hardware"/>
+  <arg name="serial_port" default="/dev/ttyACM0" description="Arduino serial device"/>
+  <arg name="baud_rate" default="115200" description="Serial communication baud rate"/>
+  <arg name="serial_timeout" default="1.0" description="Serial read timeout in seconds"/>
+
+  <node
+    pkg="sorting_cell"
+    exec="arm_controller"
+    name="arm_controller"
+    output="screen">
+
+    <param name="mock_mode" value="$(var mock_mode)"/>
+    <param name="serial_port" value="$(var serial_port)"/>
+    <param name="baud_rate" value="$(var baud_rate)"/>
+    <param name="serial_timeout" value="$(var serial_timeout)"/>
+
+  </node>
+</launch>
